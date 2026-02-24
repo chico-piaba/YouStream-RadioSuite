@@ -8,6 +8,7 @@ import sys
 import os
 import subprocess
 import platform
+import traceback
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
@@ -137,6 +138,20 @@ def main():
             print("  Certifique-se de estar no diretorio do projeto.")
             return
 
+    # Tenta abrir direto primeiro (evita falsos positivos do check em subprocesso)
+    print("  Iniciando interface grafica...")
+    print()
+    try:
+        from interface_censura_digital import main as interface_main
+        interface_main()
+        return
+    except Exception as e:
+        print(f"  ERRO ao iniciar: {e}")
+        print()
+        traceback.print_exc()
+        print()
+
+    # Se falhou, roda diagnostico de dependencias
     print("  Verificando dependencias...")
     deps, errors = check_dependencies()
     missing = [name for name, ok in deps.items() if not ok]
@@ -161,26 +176,15 @@ def main():
                     [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
                     check=True,
                 )
-                print("  Instalacao concluida!")
+                print("  Instalacao concluida! Execute novamente: python launch_interface.py")
             except subprocess.CalledProcessError:
                 print("  Falha na instalacao automatica.")
                 print("  Siga as instrucoes acima para instalar manualmente.")
-                return
-        else:
-            return
-
-    print()
-    print("  Iniciando interface grafica...")
-    print()
-
-    try:
-        from interface_censura_digital import main as interface_main
-        interface_main()
-    except Exception as e:
-        print(f"  ERRO ao iniciar: {e}")
+        return
+    else:
         print()
-        print("  Se o erro persistir, execute diretamente:")
-        print(f"    {sys.executable} interface_censura_digital.py")
+        print("  Dependencias OK. O erro pode ser outro.")
+        print(f"  Tente executar: {sys.executable} interface_censura_digital.py")
 
 
 if __name__ == "__main__":
