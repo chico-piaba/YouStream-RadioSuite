@@ -169,8 +169,12 @@ class _SoundDeviceBackend:
         return devices
 
     def open_input_stream(self, channels, rate, chunk_size, device_index, callback):
+        """Usa RawInputStream para evitar numpy no callback (menos travamentos no Windows)."""
         def _cb(indata, frames, time_info, status):
-            data = indata.tobytes()
+            try:
+                data = bytes(indata)  # RawInputStream: buffer -> bytes
+            except TypeError:
+                data = indata.tobytes()  # InputStream fallback: numpy -> bytes
             callback(data, frames, time_info, status)
 
         kwargs = dict(
@@ -182,7 +186,10 @@ class _SoundDeviceBackend:
         )
         if device_index is not None:
             kwargs["device"] = device_index
-        stream = self._sd.InputStream(**kwargs)
+        try:
+            stream = self._sd.RawInputStream(**kwargs)
+        except (AttributeError, TypeError):
+            stream = self._sd.InputStream(**kwargs)
         stream.start()
         return _SoundDeviceStream(stream)
 

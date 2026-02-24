@@ -289,6 +289,7 @@ class CensuraDigitalInterface:
         self.censura, self.processor, self.stream_manager = self._load_result
         self.censura.set_stream_manager(self.stream_manager)
         self.censura.set_alert_callback(self._on_watchdog_alert)
+        self.censura.set_recording_failed_callback(self._on_recording_failed)
         self.stream_manager.set_status_callback(self._on_stream_status)
         self.setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -769,6 +770,20 @@ class CensuraDigitalInterface:
     def _on_watchdog_alert(self, message):
         self.root.after(0, self._show_alert, message)
 
+    def _on_recording_failed(self, message):
+        """Chamado quando falha ao abrir stream (ex: timeout). Atualiza UI na main thread."""
+        self.root.after(0, self._handle_recording_failed, message)
+
+    def _handle_recording_failed(self, message):
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.health_var.set("Falha ao iniciar gravação")
+        for child in self.root.winfo_children():
+            if isinstance(child, ttk.Notebook):
+                config_tab_id = child.tabs()[3]
+                child.tab(config_tab_id, state="normal")
+        messagebox.showerror("Erro de Gravação", message)
+
     def _show_alert(self, message):
         self.health_var.set(f"[{time.strftime('%H:%M:%S')}] {message}")
         self.alert_var.set(f"[{time.strftime('%H:%M:%S')}] {message}")
@@ -875,6 +890,10 @@ class CensuraDigitalInterface:
     # ── Recording controls ────────────────────────────────────────
 
     def start_recording(self):
+        """Defer para próxima iteração do event loop para evitar travar a UI."""
+        self.root.after(0, self._do_start_recording)
+
+    def _do_start_recording(self):
         if self.censura.start_recording(enable_monitoring=self.monitor_var.get()):
             self.start_btn.config(state="disabled")
             self.stop_btn.config(state="normal")

@@ -122,6 +122,7 @@ class CensuraDigital:
         self._total_bytes = 0
         self._current_level = 0.0
         self._on_alert_callback: Optional[Callable[[str], None]] = None
+        self._on_recording_failed_callback: Optional[Callable[[str], None]] = None
 
         # Streaming fan-out (set externally via set_stream_manager)
         self._stream_manager = None
@@ -234,32 +235,53 @@ class CensuraDigital:
         self._last_data_timestamp = time.time()
 
     def _open_streams(self) -> bool:
-        with self._stream_lock:
+        """Abre streams em thread separada com timeout para evitar travar a UI.
+        No Windows, sounddevice/PyAudio podem bloquear durante abertura do stream."""
+        result_holder: list = [None]
+        exc_holder: list = [None]
+
+        def _do_open():
             try:
                 self._drain_queue()
                 audio_cfg = self.config["audio"]
-                self.input_stream = self._audio_backend.open_input_stream(
+                inp = self._audio_backend.open_input_stream(
                     channels=audio_cfg["channels"],
                     rate=audio_cfg["rate"],
                     chunk_size=audio_cfg["chunk_size"],
                     device_index=audio_cfg["device_index"],
                     callback=self._audio_callback,
                 )
-                self.logger.info("Stream de entrada aberto (callback mode).")
-
+                mon = None
                 if self.is_monitoring:
-                    self.monitor_stream = self._audio_backend.open_output_stream(
+                    mon = self._audio_backend.open_output_stream(
                         channels=audio_cfg["channels"],
                         rate=audio_cfg["rate"],
                         chunk_size=audio_cfg["chunk_size"],
                     )
-                    self.logger.info("Stream de monitoramento aberto.")
-
-                self._last_data_timestamp = time.time()
-                return True
+                result_holder[0] = (inp, mon)
             except Exception as e:
-                self.logger.error(f"Erro ao abrir streams: {e}")
-                return False
+                exc_holder[0] = e
+
+        opener = threading.Thread(target=_do_open, name="StreamOpener", daemon=True)
+        opener.start()
+        opener.join(timeout=15.0)
+        if opener.is_alive():
+            self.logger.error("Timeout ao abrir stream de áudio (15s). Verifique o dispositivo.")
+            return False
+        if exc_holder[0]:
+            self.logger.error(f"Erro ao abrir streams: {exc_holder[0]}")
+            return False
+        inp, mon = result_holder[0]
+        if inp is None:
+            return False
+        with self._stream_lock:
+            self.input_stream = inp
+            self.monitor_stream = mon
+        self._last_data_timestamp = time.time()
+        self.logger.info("Stream de entrada aberto (callback mode).")
+        if mon:
+            self.logger.info("Stream de monitoramento aberto.")
+        return True
 
     def _close_streams(self):
         with self._stream_lock:
@@ -368,6 +390,14 @@ class CensuraDigital:
             self.is_recording = False
             self._stop_event.set()
             self.logger.error("Falha ao abrir streams de áudio. Abortando.")
+            if self._on_recording_failed_callback:
+                try:
+                    self._on_recording_failed_callback(
+                        "Não foi possível abrir o dispositivo de áudio. "
+                        "Verifique se está correto e não está em uso."
+                    )
+                except Exception:
+                    pass
             return
 
         audio_cfg = self.config["audio"]
@@ -494,6 +524,10 @@ class CensuraDigital:
     def set_alert_callback(self, callback: Optional[Callable[[str], None]]):
         """Registra callback para alertas do watchdog (chamado de thread separada)."""
         self._on_alert_callback = callback
+
+    def set_recording_failed_callback(self, callback: Optional[Callable[[str], None]]):
+        """Registra callback quando falha ao iniciar gravação (ex: timeout ao abrir stream)."""
+        self._on_recording_failed_callback = callback
 
     def start_recording(self, enable_monitoring: bool = False) -> bool:
         if self.is_recording:
