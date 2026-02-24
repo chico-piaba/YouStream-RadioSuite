@@ -21,13 +21,10 @@ except ImportError:
 
 LOGO_FILENAME = "aleceplay.png"
 
-_IMPORT_ERROR = None
-try:
-    from gravador_censura_digital import CensuraDigital
-    from processador_audio import AudioProcessor
-    from stream_manager import StreamManager
-except Exception as exc:
-    _IMPORT_ERROR = str(exc)
+# Gravador/Processor/StreamManager carregados sob demanda (evita travar no Windows)
+CensuraDigital = None
+AudioProcessor = None
+StreamManager = None
 
 try:
     from tkcalendar import Calendar
@@ -232,41 +229,84 @@ class CensuraDigitalInterface:
         self.root.geometry("640x580")
         self.root.minsize(640, 580)
 
-        if _IMPORT_ERROR:
-            self._show_dependency_error(_IMPORT_ERROR)
-            return
-
         self._logo_img = None
-        self._logo_small = None
         self._load_logo()
 
-        try:
-            self.censura = CensuraDigital()
-            self.processor = AudioProcessor()
-            self.stream_manager = StreamManager(self.censura.config, logger=self.censura.logger)
-        except Exception as e:
-            messagebox.showerror("Erro Crítico na Inicialização", f"{e}")
-            self.root.destroy()
-            return
-
-        self.censura.set_stream_manager(self.stream_manager)
-        self.censura.set_alert_callback(self._on_watchdog_alert)
-        self.stream_manager.set_status_callback(self._on_stream_status)
-
+        self.censura = None
+        self.processor = None
+        self.stream_manager = None
         self._stream_error = False
         self.audio_devices = []
         self.status_poller = None
         self._monitor_poller = None
 
+        self._load_overlay = None
+        self._load_label = None
+        self._load_timeout_id = None
+        self._load_done = threading.Event()
+        self._load_result = None
+
+        self._show_loading_overlay()
+        threading.Thread(target=self._load_backend, daemon=True).start()
+        self._load_timeout_id = self.root.after(30000, self._on_load_timeout)
+
+    def _show_loading_overlay(self):
+        self._load_overlay = tk.Frame(self.root, bg="#1a1a2e", cursor="watch")
+        self._load_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        ttk.Label(self._load_overlay, text="Carregando módulos de áudio...", font=("Arial", 14)).pack(expand=True, pady=50)
+        ttk.Label(self._load_overlay, text="(No Windows, isso pode levar alguns segundos)", font=("Arial", 10)).pack(pady=5)
+
+    def _hide_loading_overlay(self):
+        if self._load_overlay:
+            self._load_overlay.destroy()
+            self._load_overlay = None
+        if self._load_timeout_id:
+            self.root.after_cancel(self._load_timeout_id)
+            self._load_timeout_id = None
+
+    def _load_backend(self):
+        try:
+            from gravador_censura_digital import CensuraDigital as CD
+            from processador_audio import AudioProcessor as AP
+            from stream_manager import StreamManager as SM
+            censura = CD()
+            processor = AP()
+            stream_manager = SM(censura.config, logger=censura.logger)
+            self._load_result = (censura, processor, stream_manager)
+        except Exception as e:
+            self._load_result = e
+        finally:
+            self._load_done.set()
+            self.root.after(0, self._on_backend_loaded)
+
+    def _on_backend_loaded(self):
+        if not self._load_done.is_set():
+            return
+        self._hide_loading_overlay()
+        if isinstance(self._load_result, Exception):
+            self._show_dependency_error(str(self._load_result))
+            return
+        self.censura, self.processor, self.stream_manager = self._load_result
+        self.censura.set_stream_manager(self.stream_manager)
+        self.censura.set_alert_callback(self._on_watchdog_alert)
+        self.stream_manager.set_status_callback(self._on_stream_status)
         self.setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.refresh_devices_list()
-        self._schedule_daily_processing()
         self._start_monitor_loop()
-
         autostart = self.censura.config.get("interface", {}).get("autostart_recording", False)
         if autostart:
             self.root.after(800, self.start_recording)
+
+    def _on_load_timeout(self):
+        self._load_timeout_id = None
+        if self._load_done.is_set():
+            return
+        self._hide_loading_overlay()
+        self._show_dependency_error(
+            "Timeout ao carregar. No Windows, PyAudio/numpy podem travar.\n"
+            "Tente: pip install pyaudio numpy\nOu use Python 3.11 em vez de 3.13."
+        )
 
     # ── Dependency error screen ────────────────────────────────
 
