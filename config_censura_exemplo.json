@@ -34,6 +34,9 @@
       "audio_bitrate_kbps": 128
     }
   },
+  "interface": {
+    "autostart_recording": false
+  },
   "logging": {
     "log_file": "censura_digital.log",
     "log_level": "INFO"

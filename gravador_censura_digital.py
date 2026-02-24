@@ -67,6 +67,7 @@ class CensuraDigital:
         self._restart_attempts = 0
         self._total_frames = 0
         self._total_bytes = 0
+        self._current_level = 0.0
         self._on_alert_callback: Optional[Callable[[str], None]] = None
 
         # Streaming fan-out (set externally via set_stream_manager)
@@ -396,17 +397,32 @@ class CensuraDigital:
                                 self._total_frames += chunk_size
                                 self._total_bytes += len(data)
 
+                                # Compute RMS level for VU meter
+                                try:
+                                    pcm = np.frombuffer(data, dtype=np.int16)
+                                    rms = np.sqrt(
+                                        np.mean(pcm.astype(np.float64) ** 2)
+                                    )
+                                    self._current_level = min(
+                                        1.0, rms / 32768.0
+                                    )
+                                except Exception:
+                                    pass
+
                                 # Monitoring (playback)
                                 if self.is_monitoring and self.monitor_stream:
                                     try:
-                                        pcm = np.frombuffer(data, dtype=np.int16)
                                         scaled = (pcm * self.monitor_volume).astype(
                                             np.int16
                                         )
                                         self.monitor_stream.write(scaled.tobytes())
-                                        del pcm, scaled
+                                        del scaled
                                     except Exception:
                                         pass
+                                    finally:
+                                        del pcm
+                                else:
+                                    del pcm
 
                                 # Streaming fan-out
                                 if self._stream_manager:
@@ -473,6 +489,7 @@ class CensuraDigital:
         self._restart_attempts = 0
         self._total_frames = 0
         self._total_bytes = 0
+        self._current_level = 0.0
         self._last_data_timestamp = 0.0
         self._drain_queue()
 
@@ -533,6 +550,7 @@ class CensuraDigital:
             "stall_count": self._stall_count,
             "total_frames": self._total_frames,
             "total_bytes": self._total_bytes,
+            "current_level": self._current_level,
             "last_data_age": (
                 round(time.time() - self._last_data_timestamp, 1)
                 if self._last_data_timestamp > 0

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Gravações (dados de produção)
+gravacoes_radio/
+
+# Config local (contém device_index específico da máquina)
+config_censura.json
