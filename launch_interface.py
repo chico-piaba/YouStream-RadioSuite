@@ -22,24 +22,50 @@ def check_python_version():
     return True
 
 
+IMPORT_TIMEOUT = 8
+
+
+def _check_module_subprocess(module_stmt):
+    """Roda import em subprocesso com timeout (evita travamento do PyAudio no Windows)."""
+    code = f"""
+import sys
+try:
+    {module_stmt}
+    sys.exit(0)
+except Exception as e:
+    print(str(e), file=sys.stderr)
+    sys.exit(1)
+"""
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=IMPORT_TIMEOUT,
+        )
+        return r.returncode == 0, (r.stderr or "").strip()
+    except subprocess.TimeoutExpired:
+        return False, "timeout (import travou)"
+    except Exception as e:
+        return False, str(e)
+
+
 def check_dependencies():
     results = {}
     errors = {}
 
-    modules = {
-        "tkinter": "import tkinter",
-        "pyaudio": "import pyaudio",
-        "numpy": "import numpy",
-        "Pillow": "from PIL import Image",
-    }
+    modules = [
+        ("tkinter", "import tkinter"),
+        ("numpy", "import numpy"),
+        ("Pillow", "from PIL import Image"),
+        ("pyaudio", "import pyaudio"),
+    ]
 
-    for name, stmt in modules.items():
-        try:
-            exec(stmt)
-            results[name] = True
-        except Exception as exc:
-            results[name] = False
-            errors[name] = str(exc)
+    for name, stmt in modules:
+        ok, err = _check_module_subprocess(stmt)
+        results[name] = ok
+        if not ok and err:
+            errors[name] = err
 
     return results, errors
 
