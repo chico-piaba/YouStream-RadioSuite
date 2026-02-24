@@ -1,0 +1,41 @@
+{
+  "audio": {
+    "format": "paInt16",
+    "channels": 1,
+    "rate": 44100,
+    "chunk_size": 1024,
+    "device_index": null
+  },
+  "recording": {
+    "chunk_duration_minutes": 15,
+    "output_directory": "gravacoes_radio",
+    "filename_prefix": "radio",
+    "max_chunks_per_day": 96
+  },
+  "processing": {
+    "mp3_bitrate_kbps": 128,
+    "ffmpeg_path": "ffmpeg",
+    "ffmpeg_threads": 1,
+    "delete_wav_after_days": 1,
+    "process_priority": "low"
+  },
+  "streaming": {
+    "rtmp": {
+      "enabled": false,
+      "url": "rtmp://servidor/live/chave_de_stream",
+      "audio_bitrate_kbps": 128
+    },
+    "icecast": {
+      "enabled": false,
+      "host": "localhost",
+      "port": 8000,
+      "mount": "/live",
+      "source_password": "senha_icecast",
+      "audio_bitrate_kbps": 128
+    }
+  },
+  "logging": {
+    "log_file": "censura_digital.log",
+    "log_level": "INFO"
+  }
+}

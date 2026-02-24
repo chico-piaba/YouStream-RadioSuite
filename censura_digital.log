@@ -1,0 +1,9 @@
+2026-02-24 11:53:04,853 - INFO - Sistema de Censura Digital inicializado
+2026-02-24 11:53:04,854 - INFO - Processador configurado para buscar em: gravacoes_radio
+2026-02-24 11:53:04,854 - INFO - FFmpeg: /opt/homebrew/bin/ffmpeg | Bitrate: 128 kbps | Threads: 1
+2026-02-24 11:53:31,273 - INFO - Gravação iniciada (Monitoramento: Ligado)
+2026-02-24 11:53:31,377 - INFO - Stream de entrada aberto (callback mode).
+2026-02-24 11:53:31,407 - INFO - Stream de monitoramento aberto.
+2026-02-24 11:53:31,407 - INFO - Iniciando chunk #1: gravacoes_radio/2026/02-24/radio_20260224_115331.wav
+2026-02-24 11:53:35,038 - INFO - Chunk #1 finalizado: radio_20260224_115331.wav (0.31 MB)
+2026-02-24 11:53:35,262 - INFO - Gravação interrompida

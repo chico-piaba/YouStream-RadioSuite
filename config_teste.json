@@ -1,0 +1,19 @@
+{
+  "audio": {
+    "format": "paInt16",
+    "channels": 1,
+    "rate": 44100,
+    "chunk_size": 1024,
+    "device_index": null
+  },
+  "recording": {
+    "chunk_duration_minutes": 15,
+    "output_directory": "gravacoes_radio",
+    "filename_prefix": "radio",
+    "max_chunks_per_day": 96
+  },
+  "logging": {
+    "log_file": "censura_digital.log",
+    "log_level": "INFO"
+  }
+}

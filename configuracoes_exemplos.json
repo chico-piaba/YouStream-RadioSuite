@@ -1,0 +1,17 @@
+{
+    "fm_radio": {
+        "sample_rate": 44100,
+        "channels": 2,
+        "duracao_chunk_minutos": 15
+    },
+    "am_radio": {
+        "sample_rate": 22050,
+        "channels": 1,
+        "duracao_chunk_minutos": 30
+    },
+    "alta_qualidade": {
+        "sample_rate": 48000,
+        "channels": 2,
+        "duracao_chunk_minutos": 15
+    }
+}
