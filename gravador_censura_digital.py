@@ -9,6 +9,7 @@ No Windows, sounddevice é preferido (PyAudio pode travar).
 """
 from __future__ import annotations
 
+import struct
 import wave
 import os
 import gc
@@ -18,9 +19,61 @@ import time
 from datetime import datetime, date
 import json
 import logging
-import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
+
+_NUMPY_AVAILABLE = None
+
+
+def _have_numpy() -> bool:
+    global _NUMPY_AVAILABLE
+    if _NUMPY_AVAILABLE is None:
+        try:
+            import numpy
+            _NUMPY_AVAILABLE = True
+        except Exception:
+            _NUMPY_AVAILABLE = False
+    return _NUMPY_AVAILABLE
+
+
+def _compute_rms(data: bytes) -> float:
+    """Calcula RMS do PCM int16. Usa numpy se disponível, senão Python puro."""
+    n = len(data) // 2
+    if n == 0:
+        return 0.0
+    if _have_numpy():
+        try:
+            import numpy as np
+            pcm = np.frombuffer(data, dtype=np.int16)
+            rms = float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
+            return min(1.0, rms / 32768.0)
+        except Exception:
+            pass
+    total = 0
+    for i in range(n):
+        s = struct.unpack_from("h", data, i * 2)[0]
+        total += s * s
+    rms = (total / n) ** 0.5
+    return min(1.0, rms / 32768.0)
+
+
+def _scale_monitor_pcm(data: bytes, volume: float) -> bytes:
+    """Escala PCM int16 para monitor. Usa numpy se disponível, senão Python puro."""
+    if _have_numpy():
+        try:
+            import numpy as np
+            pcm = np.frombuffer(data, dtype=np.int16)
+            scaled = (pcm * volume).astype(np.int16)
+            return scaled.tobytes()
+        except Exception:
+            pass
+    n = len(data) // 2
+    result = bytearray(len(data))
+    for i in range(n):
+        s = struct.unpack_from("h", data, i * 2)[0]
+        scaled = max(-32768, min(32767, int(s * volume)))
+        struct.pack_into("h", result, i * 2, scaled)
+    return bytes(result)
 
 WATCHDOG_CHECK_INTERVAL = 2.0
 STALL_THRESHOLD_SECONDS = 10.0
@@ -378,31 +431,17 @@ class CensuraDigital:
                                 self._total_bytes += len(data)
 
                                 # Compute RMS level for VU meter
-                                try:
-                                    pcm = np.frombuffer(data, dtype=np.int16)
-                                    rms = np.sqrt(
-                                        np.mean(pcm.astype(np.float64) ** 2)
-                                    )
-                                    self._current_level = min(
-                                        1.0, rms / 32768.0
-                                    )
-                                except Exception:
-                                    pass
+                                self._current_level = _compute_rms(data)
 
                                 # Monitoring (playback)
                                 if self.is_monitoring and self.monitor_stream:
                                     try:
-                                        scaled = (pcm * self.monitor_volume).astype(
-                                            np.int16
+                                        scaled = _scale_monitor_pcm(
+                                            data, self.monitor_volume
                                         )
-                                        self.monitor_stream.write(scaled.tobytes())
-                                        del scaled
+                                        self.monitor_stream.write(scaled)
                                     except Exception:
                                         pass
-                                    finally:
-                                        del pcm
-                                else:
-                                    del pcm
 
                                 # Streaming fan-out
                                 if self._stream_manager:

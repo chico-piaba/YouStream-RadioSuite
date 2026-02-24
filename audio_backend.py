@@ -214,6 +214,9 @@ class _SoundDeviceStream:
         self._stream.close()
 
     def write(self, data):
-        import numpy as np
-        arr = np.frombuffer(data, dtype=np.int16)
-        self._stream.write(arr)
+        try:
+            import numpy as np
+            arr = np.frombuffer(data, dtype=np.int16)
+            self._stream.write(arr)
+        except Exception:
+            pass
