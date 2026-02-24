@@ -1,5 +1,4 @@
 PyAudio
 numpy
 tkcalendar
-pystray
 Pillow

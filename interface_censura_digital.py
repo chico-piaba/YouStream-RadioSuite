@@ -21,9 +21,13 @@ except ImportError:
 
 LOGO_FILENAME = "aleceplay.png"
 
-from gravador_censura_digital import CensuraDigital
-from processador_audio import AudioProcessor
-from stream_manager import StreamManager
+_IMPORT_ERROR = None
+try:
+    from gravador_censura_digital import CensuraDigital
+    from processador_audio import AudioProcessor
+    from stream_manager import StreamManager
+except ImportError as exc:
+    _IMPORT_ERROR = str(exc)
 
 try:
     from tkcalendar import Calendar
@@ -228,6 +232,10 @@ class CensuraDigitalInterface:
         self.root.geometry("640x580")
         self.root.minsize(640, 580)
 
+        if _IMPORT_ERROR:
+            self._show_dependency_error(_IMPORT_ERROR)
+            return
+
         self._logo_img = None
         self._logo_small = None
         self._load_logo()
@@ -260,6 +268,47 @@ class CensuraDigitalInterface:
         if autostart:
             self.root.after(800, self.start_recording)
 
+    # ── Dependency error screen ────────────────────────────────
+
+    def _show_dependency_error(self, error_msg):
+        import platform
+        is_win = platform.system() == "Windows"
+
+        frame = ttk.Frame(self.root, padding="30")
+        frame.pack(expand=True, fill="both")
+
+        ttk.Label(frame, text="Dependência não encontrada", font=("Arial", 14, "bold")).pack(pady=(0, 15))
+        ttk.Label(frame, text=f"Erro: {error_msg}", wraplength=500, foreground="red").pack(pady=(0, 15))
+
+        if "pyaudio" in error_msg.lower():
+            if is_win:
+                instructions = (
+                    "No Windows, instale o PyAudio com:\n\n"
+                    "  pip install pyaudio\n\n"
+                    "Se falhar, instale o Build Tools do Visual Studio ou use:\n\n"
+                    "  pip install pipwin\n"
+                    "  pipwin install pyaudio\n\n"
+                    "Certifique-se de ter Python 3.10+ instalado do python.org"
+                )
+            else:
+                instructions = (
+                    "Instale as dependências:\n\n"
+                    "  brew install portaudio\n"
+                    "  pip install pyaudio numpy\n"
+                )
+        else:
+            instructions = (
+                "Instale todas as dependências:\n\n"
+                "  pip install -r requirements.txt\n"
+            )
+
+        text = tk.Text(frame, wrap=tk.WORD, height=12, width=60, font=("Courier", 11))
+        text.pack(pady=10, fill="x")
+        text.insert("1.0", instructions)
+        text.config(state="disabled")
+
+        ttk.Button(frame, text="Fechar", command=self.root.destroy).pack(pady=10)
+
     # ── Logo ─────────────────────────────────────────────────────
 
     def _load_logo(self):
@@ -279,12 +328,21 @@ class CensuraDigitalInterface:
             offset_y = (sq - img.height) // 2
             icon_base.paste(img, (offset_x, offset_y))
 
-            self._icon_imgs = []
-            for sz in (256, 128, 64, 32):
-                resized = icon_base.resize((sz, sz), Image.LANCZOS)
-                photo = ImageTk.PhotoImage(resized)
-                self._icon_imgs.append(photo)
-            self.root.iconphoto(True, *self._icon_imgs)
+            import platform
+            if platform.system() == "Windows":
+                import tempfile
+                ico_path = Path(tempfile.gettempdir()) / "aleceplay.ico"
+                sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
+                ico_images = [icon_base.resize(s, Image.LANCZOS) for s in sizes]
+                ico_images[0].save(str(ico_path), format="ICO", sizes=sizes, append_images=ico_images[1:])
+                self.root.iconbitmap(str(ico_path))
+            else:
+                self._icon_imgs = []
+                for sz in (256, 128, 64, 32):
+                    resized = icon_base.resize((sz, sz), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(resized)
+                    self._icon_imgs.append(photo)
+                self.root.iconphoto(True, *self._icon_imgs)
 
             # Logo for Monitor tab
             target_h = 80
