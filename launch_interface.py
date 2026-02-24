@@ -76,17 +76,13 @@ def check_dependencies():
 
 def print_install_instructions(missing):
     print()
-    if "pyaudio" in missing:
+    if "pyaudio" in missing or "sounddevice" in str(missing).lower():
         if IS_WINDOWS:
-            print("  PyAudio no Windows:")
+            print("  No Windows, use sounddevice (mais estavel que PyAudio):")
+            print("    pip install sounddevice")
+            print()
+            print("  Ou tente PyAudio:")
             print("    pip install pyaudio")
-            print()
-            print("  Se falhar, tente:")
-            print("    pip install pipwin")
-            print("    pipwin install pyaudio")
-            print()
-            print("  Ou baixe o .whl de:")
-            print("    https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio")
         elif IS_MAC:
             print("  PyAudio no macOS:")
             print("    brew install portaudio")

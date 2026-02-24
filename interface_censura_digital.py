@@ -320,15 +320,13 @@ class CensuraDigitalInterface:
         ttk.Label(frame, text="Dependência não encontrada", font=("Arial", 14, "bold")).pack(pady=(0, 15))
         ttk.Label(frame, text=f"Erro: {error_msg}", wraplength=500, foreground="red").pack(pady=(0, 15))
 
-        if "pyaudio" in error_msg.lower():
+        if "pyaudio" in error_msg.lower() or "sounddevice" in error_msg.lower() or "audio" in error_msg.lower():
             if is_win:
                 instructions = (
-                    "No Windows, instale o PyAudio com:\n\n"
-                    "  pip install pyaudio\n\n"
-                    "Se falhar, instale o Build Tools do Visual Studio ou use:\n\n"
-                    "  pip install pipwin\n"
-                    "  pipwin install pyaudio\n\n"
-                    "Certifique-se de ter Python 3.10+ instalado do python.org"
+                    "No Windows, use sounddevice (mais estável que PyAudio):\n\n"
+                    "  pip install sounddevice\n\n"
+                    "Ou tente PyAudio:\n\n"
+                    "  pip install pyaudio"
                 )
             else:
                 instructions = (

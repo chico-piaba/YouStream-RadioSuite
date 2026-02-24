@@ -3,12 +3,12 @@
 Gravador de Censura Digital para Rádio
 Sistema de gravação contínua com divisão em chunks organizados por horário.
 
-Usa modo callback do PyAudio com queue.Queue para captura não-bloqueante,
-watchdog para detecção de stalls, e fan-out para streaming.
+Usa modo callback (PyAudio ou sounddevice) com queue.Queue para captura
+não-bloqueante, watchdog para detecção de stalls, e fan-out para streaming.
+No Windows, sounddevice é preferido (PyAudio pode travar).
 """
 from __future__ import annotations
 
-import pyaudio
 import wave
 import os
 import gc
@@ -32,14 +32,14 @@ AUDIO_QUEUE_MAXSIZE = 2000
 class CensuraDigital:
     def __init__(self, config_file: str = "config_censura.json"):
         self.config_file = config_file
-        self.audio = None
 
         self.config: dict = {}
         self.setup_logging()
         self.load_config()
         self.setup_logging()
 
-        self.audio = pyaudio.PyAudio()
+        from audio_backend import get_backend
+        self._audio_backend = get_backend()
 
         # Recording state
         self.is_recording = False
@@ -150,13 +150,7 @@ class CensuraDigital:
     # ── Audio devices ─────────────────────────────────────────────
 
     def get_audio_devices(self) -> list[dict[str, Any]]:
-        devices = []
-        for i in range(self.audio.get_device_count()):
-            try:
-                devices.append(self.audio.get_device_info_by_index(i))
-            except Exception as e:
-                self.logger.warning(f"Erro ao obter info do dispositivo {i}: {e}")
-        return devices
+        return self._audio_backend.get_devices()
 
     def list_audio_devices(self):
         devices = self.get_audio_devices()
@@ -172,49 +166,39 @@ class CensuraDigital:
             print(f"  Taxa de amostragem padrão: {dev['defaultSampleRate']}")
             print()
 
-    def get_audio_format(self):
-        format_map = {
-            "paInt16": pyaudio.paInt16,
-            "paInt24": pyaudio.paInt24,
-            "paInt32": pyaudio.paInt32,
-            "paFloat32": pyaudio.paFloat32,
-        }
-        return format_map.get(self.config["audio"]["format"], pyaudio.paInt16)
+    def _get_sample_width(self) -> int:
+        """Largura da amostra em bytes (sempre 2 para int16)."""
+        return 2
 
     # ── Stream management (callback mode) ─────────────────────────
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
-        """PyAudio callback – deposita dados na queue (nunca bloqueia)."""
+        """Callback de áudio – deposita dados na queue (nunca bloqueia)."""
         try:
             self._audio_queue.put_nowait(in_data)
         except queue.Full:
             pass
         self._last_data_timestamp = time.time()
-        return (None, pyaudio.paContinue)
 
     def _open_streams(self) -> bool:
         with self._stream_lock:
             try:
                 self._drain_queue()
                 audio_cfg = self.config["audio"]
-                self.input_stream = self.audio.open(
-                    format=self.get_audio_format(),
+                self.input_stream = self._audio_backend.open_input_stream(
                     channels=audio_cfg["channels"],
                     rate=audio_cfg["rate"],
-                    input=True,
-                    input_device_index=audio_cfg["device_index"],
-                    frames_per_buffer=audio_cfg["chunk_size"],
-                    stream_callback=self._audio_callback,
+                    chunk_size=audio_cfg["chunk_size"],
+                    device_index=audio_cfg["device_index"],
+                    callback=self._audio_callback,
                 )
                 self.logger.info("Stream de entrada aberto (callback mode).")
 
                 if self.is_monitoring:
-                    self.monitor_stream = self.audio.open(
-                        format=self.get_audio_format(),
+                    self.monitor_stream = self._audio_backend.open_output_stream(
                         channels=audio_cfg["channels"],
                         rate=audio_cfg["rate"],
-                        output=True,
-                        frames_per_buffer=audio_cfg["chunk_size"],
+                        chunk_size=audio_cfg["chunk_size"],
                     )
                     self.logger.info("Stream de monitoramento aberto.")
 
@@ -276,14 +260,12 @@ class CensuraDigital:
 
             try:
                 audio_cfg = self.config["audio"]
-                self.input_stream = self.audio.open(
-                    format=self.get_audio_format(),
+                self.input_stream = self._audio_backend.open_input_stream(
                     channels=audio_cfg["channels"],
                     rate=audio_cfg["rate"],
-                    input=True,
-                    input_device_index=audio_cfg["device_index"],
-                    frames_per_buffer=audio_cfg["chunk_size"],
-                    stream_callback=self._audio_callback,
+                    chunk_size=audio_cfg["chunk_size"],
+                    device_index=audio_cfg["device_index"],
+                    callback=self._audio_callback,
                 )
                 self._last_data_timestamp = time.time()
                 self._restart_attempts = 0
@@ -374,9 +356,7 @@ class CensuraDigital:
                 try:
                     with wave.open(str(output_path), "wb") as wf:
                         wf.setnchannels(audio_cfg["channels"])
-                        wf.setsampwidth(
-                            self.audio.get_sample_size(self.get_audio_format())
-                        )
+                        wf.setsampwidth(self._get_sample_width())
                         wf.setframerate(rate)
 
                         frames_written = 0
@@ -565,15 +545,17 @@ class CensuraDigital:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop_recording()
-        if self.audio:
-            self.audio.terminate()
-            self.audio = None
+        if self._audio_backend:
+            try:
+                self._audio_backend.terminate()
+            except Exception:
+                pass
         return False
 
     def __del__(self):
-        if self.audio:
+        if getattr(self, "_audio_backend", None):
             try:
-                self.audio.terminate()
+                self._audio_backend.terminate()
             except Exception:
                 pass
 
