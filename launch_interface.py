@@ -24,36 +24,24 @@ def check_python_version():
 
 def check_dependencies():
     results = {}
+    errors = {}
 
-    # Tkinter
-    try:
-        import tkinter
-        results["tkinter"] = True
-    except ImportError:
-        results["tkinter"] = False
+    modules = {
+        "tkinter": "import tkinter",
+        "pyaudio": "import pyaudio",
+        "numpy": "import numpy",
+        "Pillow": "from PIL import Image",
+    }
 
-    # PyAudio
-    try:
-        import pyaudio
-        results["pyaudio"] = True
-    except ImportError:
-        results["pyaudio"] = False
+    for name, stmt in modules.items():
+        try:
+            exec(stmt)
+            results[name] = True
+        except Exception as exc:
+            results[name] = False
+            errors[name] = str(exc)
 
-    # NumPy
-    try:
-        import numpy
-        results["numpy"] = True
-    except ImportError:
-        results["numpy"] = False
-
-    # Pillow
-    try:
-        from PIL import Image
-        results["Pillow"] = True
-    except ImportError:
-        results["Pillow"] = False
-
-    return results
+    return results, errors
 
 
 def print_install_instructions(missing):
@@ -123,12 +111,16 @@ def main():
             print("  Certifique-se de estar no diretorio do projeto.")
             return
 
-    deps = check_dependencies()
+    print("  Verificando dependencias...")
+    deps, errors = check_dependencies()
     missing = [name for name, ok in deps.items() if not ok]
 
     for name, ok in deps.items():
         status = "OK" if ok else "FALTANDO"
-        print(f"  {name:12s} ... {status}")
+        line = f"  {name:12s} ... {status}"
+        if name in errors:
+            line += f"  ({errors[name]})"
+        print(line)
 
     if missing:
         print()

@@ -26,7 +26,7 @@ try:
     from gravador_censura_digital import CensuraDigital
     from processador_audio import AudioProcessor
     from stream_manager import StreamManager
-except ImportError as exc:
+except Exception as exc:
     _IMPORT_ERROR = str(exc)
 
 try:
