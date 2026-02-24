@@ -2,6 +2,7 @@
 """
 Launcher para a Interface Gráfica do Sistema de Censura Digital
 Detecta dependências e fornece instruções para instalação.
+Roda a interface em subprocesso com timeout para evitar travamento no Windows.
 """
 
 import sys
@@ -9,9 +10,11 @@ import os
 import subprocess
 import platform
 import traceback
+import threading
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
+STARTUP_TIMEOUT = 25
 
 
 def check_python_version():
@@ -138,20 +141,56 @@ def main():
             print("  Certifique-se de estar no diretorio do projeto.")
             return
 
-    # Tenta abrir direto primeiro (evita falsos positivos do check em subprocesso)
+    if not os.path.exists("run_interface.py"):
+        print("  ERRO: run_interface.py nao encontrado!")
+        return
+
+    # Roda interface em subprocesso com timeout (evita travar se PyAudio travar no Windows)
     print("  Iniciando interface grafica...")
     print()
-    try:
-        from interface_censura_digital import main as interface_main
-        interface_main()
-        return
-    except Exception as e:
-        print(f"  ERRO ao iniciar: {e}")
-        print()
-        traceback.print_exc()
+    proc = subprocess.Popen(
+        [sys.executable, "run_interface.py"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        cwd=os.getcwd(),
+    )
+    ready = [False]
+
+    def read_ready():
+        try:
+            line = proc.stdout.readline()
+            if line and "READY" in line:
+                ready[0] = True
+        except Exception:
+            pass
+
+    t = threading.Thread(target=read_ready, daemon=True)
+    t.start()
+
+    for _ in range(STARTUP_TIMEOUT):
+        t.join(timeout=1)
+        if ready[0]:
+            proc.wait()
+            return
+        if proc.poll() is not None:
+            err = proc.stderr.read() if proc.stderr else ""
+            if err:
+                print(f"  ERRO: {err.strip()}")
+            break
+
+    if not ready[0] and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        print("  A interface travou ao carregar (timeout).")
+        print("  No Windows, o PyAudio pode travar. Verifique as instrucoes abaixo.")
         print()
 
-    # Se falhou, roda diagnostico de dependencias
+    # Se falhou ou travou, roda diagnostico de dependencias
     print("  Verificando dependencias...")
     deps, errors = check_dependencies()
     missing = [name for name, ok in deps.items() if not ok]
