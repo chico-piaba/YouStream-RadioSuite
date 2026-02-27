@@ -32,7 +32,42 @@ interface_censura_digital.py   ← Interface gráfica (Tk)
     └── processador_audio.py         ← Conversão WAV→MP3, ZIP, extração de trechos
 ```
 
-## Implantação e Execução em Windows
+## Empacotamento para Windows (executável standalone)
+
+Para distribuir o app sem exigir instalação de Python, use PyInstaller:
+
+### Build do executável
+
+1. No **Windows**, com o ambiente configurado:
+   ```bat
+   build_windows.bat
+   ```
+
+2. Ou manualmente:
+   ```bat
+   venv\Scripts\pip install -r requirements.txt -r requirements-build.txt
+   venv\Scripts\python -m PyInstaller build_windows.spec --noconfirm --clean
+   ```
+
+3. A pasta **`dist\CensuraDigital\`** conterá:
+   - `CensuraDigital.exe` – executável principal
+   - `config_censura_exemplo.json` – modelo de configuração
+   - DLLs e dependências necessárias
+
+### Distribuição para o usuário final
+
+1. Compacte a pasta `dist\CensuraDigital\` em um ZIP.
+2. O usuário precisa:
+   - Extrair o ZIP para uma pasta (ex: `C:\CensuraDigital`)
+   - Ter **FFmpeg no PATH** (para streaming RTMP/Icecast)
+   - Copiar `config_censura_exemplo.json` → `config_censura.json` e editar
+   - Executar `CensuraDigital.exe`
+
+Não é necessário instalar Python nem dependências.
+
+---
+
+## Implantação e Execução em Windows (desenvolvimento)
 
 ### 1. Pré-requisitos
 

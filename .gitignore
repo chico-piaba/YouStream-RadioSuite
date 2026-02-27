@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+venv/
 
 # macOS
 .DS_Store
@@ -15,3 +16,8 @@ gravacoes_radio/
 
 # Config local (contém device_index específico da máquina)
 config_censura.json
+
+# PyInstaller build
+build/
+dist/
+*.spec.bak

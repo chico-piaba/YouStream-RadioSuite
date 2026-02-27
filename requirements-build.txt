@@ -1,0 +1,3 @@
+# Dependencias para build (empacotar em .exe)
+# pip install -r requirements.txt -r requirements-build.txt
+pyinstaller>=6.0

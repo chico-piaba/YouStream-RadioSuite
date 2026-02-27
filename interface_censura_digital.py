@@ -6,6 +6,7 @@ Monitor visual com semáforos, VU meter, streaming RTMP/Icecast e autostart.
 
 import math
 import os
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 import threading
@@ -353,7 +354,10 @@ class CensuraDigitalInterface:
     def _load_logo(self):
         if not PIL_AVAILABLE:
             return
-        base_dir = Path(__file__).resolve().parent
+        if getattr(sys, "frozen", False):
+            base_dir = Path(sys._MEIPASS)
+        else:
+            base_dir = Path(__file__).resolve().parent
         logo_path = base_dir / LOGO_FILENAME
         if not logo_path.exists():
             return
