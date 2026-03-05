@@ -5,17 +5,29 @@ __pycache__/
 .venv/
 venv/
 
+# IDE
+.cursor/
+
 # macOS
 .DS_Store
 
 # Logs
 *.log
 
-# Gravações (dados de produção)
+# Gravações (dados de produção e testes)
 gravacoes_radio/
+teste_gravacao/
+*.wav
 
 # Config local (contém device_index específico da máquina)
 config_censura.json
+config_teste.json
+
+# Status de runtime (gerado automaticamente)
+censura_status.json
+
+# Scripts de teste ad-hoc
+_test_open.py
 
 # PyInstaller build
 build/

@@ -4,8 +4,10 @@ Sistema de Censura Digital - Interface Gráfica v2.1
 Monitor visual com semáforos, VU meter, streaming RTMP/Icecast e autostart.
 """
 
+import json
 import math
 import os
+import subprocess
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
@@ -13,6 +15,14 @@ import threading
 import time
 from datetime import datetime, date, timedelta
 from pathlib import Path
+
+# Gravação em processo separado: se travar (crash nativo), a janela continua aberta
+USE_WORKER_RECORDING = True
+WORKER_STATUS_FILE = "censura_status.json"
+WORKER_STOP_FILE = "censura_stop.flag"
+WORKER_RTMP_CMD_FILE = "stream_rtmp_cmd.json"
+WORKER_ICECAST_CMD_FILE = "stream_icecast_cmd.json"
+WORKER_SCRIPT = "recorder_worker.py"
 
 try:
     from PIL import Image, ImageTk
@@ -226,9 +236,9 @@ class ProcessorWindow(tk.Toplevel):
 class CensuraDigitalInterface:
     def __init__(self, root):
         self.root = root
-        self.root.title("Alece Play - Sistema de Censura Digital v2.1")
-        self.root.geometry("640x580")
-        self.root.minsize(640, 580)
+        self.root.title("Alece Play - Sistema de Censura Digital v2.2")
+        self.root.geometry("660x720")
+        self.root.minsize(660, 680)
 
         self._logo_img = None
         self._load_logo()
@@ -240,58 +250,30 @@ class CensuraDigitalInterface:
         self.audio_devices = []
         self.status_poller = None
         self._monitor_poller = None
+        self._worker_proc = None
 
-        self._load_overlay = None
-        self._load_label = None
-        self._load_timeout_id = None
-        self._load_done = threading.Event()
-        self._load_result = None
-
-        self._show_loading_overlay()
-        threading.Thread(target=self._load_backend, daemon=True).start()
-        self._load_timeout_id = self.root.after(30000, self._on_load_timeout)
-
-    def _show_loading_overlay(self):
-        self._load_overlay = tk.Frame(self.root, bg="#1a1a2e", cursor="watch")
-        self._load_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-        ttk.Label(self._load_overlay, text="Carregando módulos de áudio...", font=("Arial", 14)).pack(expand=True, pady=50)
-        ttk.Label(self._load_overlay, text="(No Windows, isso pode levar alguns segundos)", font=("Arial", 10)).pack(pady=5)
-
-    def _hide_loading_overlay(self):
-        if self._load_overlay:
-            self._load_overlay.destroy()
-            self._load_overlay = None
-        if self._load_timeout_id:
-            self.root.after_cancel(self._load_timeout_id)
-            self._load_timeout_id = None
-
-    def _load_backend(self):
+        # Carregamento direto no mesmo processo (como no censura-digital funcional)
+        load_frame = tk.Frame(self.root, bg="#1a1a2e")
+        load_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        ttk.Label(load_frame, text="Iniciando Sistema de Censura Digital...", font=("Arial", 14)).pack(expand=True, pady=50)
+        self.root.update()
         try:
             from gravador_censura_digital import CensuraDigital as CD
             from processador_audio import AudioProcessor as AP
             from stream_manager import StreamManager as SM
-            censura = CD()
-            processor = AP()
-            stream_manager = SM(censura.config, logger=censura.logger)
-            self._load_result = (censura, processor, stream_manager)
+            self.censura = CD()
+            self.processor = AP()
+            self.stream_manager = SM(self.censura.config, logger=self.censura.logger)
+            self.censura.set_stream_manager(self.stream_manager)
+            self.censura.set_alert_callback(self._on_watchdog_alert)
+            self.censura.set_recording_failed_callback(self._on_recording_failed)
+            self.stream_manager.set_status_callback(self._on_stream_status)
         except Exception as e:
-            self._load_result = e
-        finally:
-            self._load_done.set()
-            self.root.after(0, self._on_backend_loaded)
-
-    def _on_backend_loaded(self):
-        if not self._load_done.is_set():
+            load_frame.destroy()
+            messagebox.showerror("Erro ao iniciar", str(e))
+            self.root.destroy()
             return
-        self._hide_loading_overlay()
-        if isinstance(self._load_result, Exception):
-            self._show_dependency_error(str(self._load_result))
-            return
-        self.censura, self.processor, self.stream_manager = self._load_result
-        self.censura.set_stream_manager(self.stream_manager)
-        self.censura.set_alert_callback(self._on_watchdog_alert)
-        self.censura.set_recording_failed_callback(self._on_recording_failed)
-        self.stream_manager.set_status_callback(self._on_stream_status)
+        load_frame.destroy()
         self.setup_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.refresh_devices_list()
@@ -299,16 +281,6 @@ class CensuraDigitalInterface:
         autostart = self.censura.config.get("interface", {}).get("autostart_recording", False)
         if autostart:
             self.root.after(800, self.start_recording)
-
-    def _on_load_timeout(self):
-        self._load_timeout_id = None
-        if self._load_done.is_set():
-            return
-        self._hide_loading_overlay()
-        self._show_dependency_error(
-            "Timeout ao carregar. No Windows, PyAudio/numpy podem travar.\n"
-            "Tente: pip install pyaudio numpy\nOu use Python 3.11 em vez de 3.13."
-        )
 
     # ── Dependency error screen ────────────────────────────────
 
@@ -476,9 +448,37 @@ class CensuraDigitalInterface:
         self.ice_card_detail = ttk.Label(ice_card, text="--", anchor="center", font=("Arial", 9))
         self.ice_card_detail.pack(pady=(2, 0))
 
+        # Streaming metrics panel
+        metrics_frame = ttk.LabelFrame(frame, text="Métricas de Transmissão", padding="8")
+        metrics_frame.pack(fill="x", pady=(8, 0))
+        metrics_frame.columnconfigure((0, 1), weight=1)
+
+        rtmp_m = ttk.Frame(metrics_frame)
+        rtmp_m.grid(row=0, column=0, padx=5, sticky="nsew")
+        ttk.Label(rtmp_m, text="RTMP", font=("Arial", 9, "bold")).pack(anchor="w")
+        self.rtmp_metrics_var = tk.StringVar(value="--")
+        ttk.Label(rtmp_m, textvariable=self.rtmp_metrics_var, font=("Consolas", 8), justify=tk.LEFT).pack(anchor="w")
+
+        ice_m = ttk.Frame(metrics_frame)
+        ice_m.grid(row=0, column=1, padx=5, sticky="nsew")
+        ttk.Label(ice_m, text="Icecast", font=("Arial", 9, "bold")).pack(anchor="w")
+        self.ice_metrics_var = tk.StringVar(value="--")
+        ttk.Label(ice_m, textvariable=self.ice_metrics_var, font=("Consolas", 8), justify=tk.LEFT).pack(anchor="w")
+
+        # Quality bar (RTMP)
+        qbar_frame = ttk.Frame(metrics_frame)
+        qbar_frame.grid(row=1, column=0, columnspan=2, padx=5, pady=(4, 0), sticky="ew")
+        ttk.Label(qbar_frame, text="Qualidade:", font=("Arial", 8)).pack(side="left")
+        self._quality_canvas = tk.Canvas(qbar_frame, width=200, height=12, highlightthickness=0, bg="#1a1a1a")
+        self._quality_canvas.pack(side="left", padx=5)
+        self._quality_bar = self._quality_canvas.create_rectangle(1, 1, 1, 11, outline="", fill="#22CC22")
+        self._quality_canvas.create_rectangle(0, 0, 200, 12, outline="#444444")
+        self.quality_label = ttk.Label(qbar_frame, text="--", font=("Arial", 8), width=8)
+        self.quality_label.pack(side="left")
+
         # Autostart checkbox
         auto_frame = ttk.Frame(frame)
-        auto_frame.pack(fill="x", pady=(15, 5))
+        auto_frame.pack(fill="x", pady=(8, 3))
         self.autostart_var = tk.BooleanVar(
             value=self.censura.config.get("interface", {}).get("autostart_recording", False)
         )
@@ -491,11 +491,11 @@ class CensuraDigitalInterface:
 
         # Alert bar
         alert_frame = ttk.LabelFrame(frame, text="Alertas", padding="5")
-        alert_frame.pack(fill="x", pady=(10, 0))
+        alert_frame.pack(fill="x", pady=(5, 0))
         self.alert_var = tk.StringVar(value="Nenhum alerta")
         ttk.Label(alert_frame, textvariable=self.alert_var, wraplength=550).pack(fill="x")
 
-        ttk.Label(frame, text="Alece Play  |  Desenvolvido por Rodrigo Lima", font=("Arial", 8)).pack(side="bottom", pady=5)
+        ttk.Label(frame, text="Alece Play  |  Desenvolvido por Rodrigo Lima", font=("Arial", 8)).pack(side="bottom", pady=3)
 
     def _save_autostart(self):
         if "interface" not in self.censura.config:
@@ -514,6 +514,28 @@ class CensuraDigitalInterface:
     def _update_monitor(self):
         status = self.censura.get_status()
         stream_st = self.stream_manager.get_status()
+        worker_data = None
+        if USE_WORKER_RECORDING and self._worker_proc is not None and os.path.isfile(WORKER_STATUS_FILE):
+            try:
+                with open(WORKER_STATUS_FILE, "r", encoding="utf-8") as f:
+                    worker_data = json.load(f)
+                status = {
+                    **status,
+                    "is_recording": worker_data.get("is_recording", False),
+                    "chunk_counter": worker_data.get("chunk_counter", 0),
+                    "current_chunk_start": worker_data.get("current_chunk_start"),
+                    "current_level": worker_data.get("current_level", 0.0),
+                    "stall_count": worker_data.get("stall_count", 0),
+                }
+                stream_st = {
+                    **stream_st,
+                    "rtmp_active": worker_data.get("rtmp_active", False),
+                    "icecast_active": worker_data.get("icecast_active", False),
+                    "rtmp_metrics": worker_data.get("rtmp_metrics", {}),
+                    "icecast_metrics": worker_data.get("icecast_metrics", {}),
+                }
+            except Exception:
+                pass
         is_rec = status["is_recording"]
         stalls = status.get("stall_count", 0)
 
@@ -547,15 +569,25 @@ class CensuraDigitalInterface:
         else:
             self.rec_card_detail.config(text="--")
 
-        # RTMP semaphore: red=ON AIR, green=pronto, yellow=erro, off=inativo
+        # RTMP semaphore
         rtmp_active = stream_st.get("rtmp_active", False)
+        rtmp_m = stream_st.get("rtmp_metrics", {})
         if rtmp_active:
-            self.rtmp_semaphore.set_state("red")
-            self.rtmp_card_status.config(text="ON AIR")
-            self.rtmp_card_detail.config(text=self.rtmp_status_var.get()[:30])
+            rtmp_connected = rtmp_m.get("connected", False)
+            if rtmp_connected:
+                self.rtmp_semaphore.set_state("red")
+                self.rtmp_card_status.config(text="ON AIR")
+                self.rtmp_card_detail.config(
+                    text=f"{rtmp_m.get('target_bitrate_kbps', 0)} kbps"
+                )
+            else:
+                self.rtmp_semaphore.set_state("yellow")
+                self.rtmp_card_status.config(text="CONECTANDO")
+                self.rtmp_card_detail.config(text="Aguardando servidor...")
         elif self._stream_error:
             self.rtmp_semaphore.set_state("yellow")
             self.rtmp_card_status.config(text="ERRO")
+            self.rtmp_card_detail.config(text=rtmp_m.get("last_error", "")[:30])
         elif is_rec:
             self.rtmp_semaphore.set_state("green")
             self.rtmp_card_status.config(text="PRONTO")
@@ -565,15 +597,25 @@ class CensuraDigitalInterface:
             self.rtmp_card_status.config(text="INATIVO")
             self.rtmp_card_detail.config(text="--")
 
-        # Icecast semaphore: red=ON AIR, green=pronto, yellow=erro, off=inativo
+        # Icecast semaphore
         ice_active = stream_st.get("icecast_active", False)
+        ice_m = stream_st.get("icecast_metrics", {})
         if ice_active:
-            self.ice_semaphore.set_state("red")
-            self.ice_card_status.config(text="ON AIR")
-            self.ice_card_detail.config(text=self.ice_status_var.get()[:30])
+            ice_connected = ice_m.get("connected", False)
+            if ice_connected:
+                self.ice_semaphore.set_state("red")
+                self.ice_card_status.config(text="ON AIR")
+                self.ice_card_detail.config(
+                    text=f"{ice_m.get('target_bitrate_kbps', 0)} kbps"
+                )
+            else:
+                self.ice_semaphore.set_state("yellow")
+                self.ice_card_status.config(text="CONECTANDO")
+                self.ice_card_detail.config(text="Aguardando servidor...")
         elif self._stream_error:
             self.ice_semaphore.set_state("yellow")
             self.ice_card_status.config(text="ERRO")
+            self.ice_card_detail.config(text=ice_m.get("last_error", "")[:30])
         elif is_rec:
             self.ice_semaphore.set_state("green")
             self.ice_card_status.config(text="PRONTO")
@@ -583,7 +625,64 @@ class CensuraDigitalInterface:
             self.ice_card_status.config(text="INATIVO")
             self.ice_card_detail.config(text="--")
 
+        # Streaming metrics panel
+        self._update_metrics_display(rtmp_active, rtmp_m, ice_active, ice_m)
+
         self._monitor_poller = self.root.after(MONITOR_REFRESH_MS, self._update_monitor)
+
+    def _format_metrics(self, m: dict, active: bool) -> str:
+        if not active or not m:
+            return "--"
+        conn = "SIM" if m.get("connected", False) else "NÃO"
+        uptime = int(m.get("uptime_seconds", 0))
+        um, us = divmod(uptime, 60)
+        uh, um = divmod(um, 60)
+        uptime_str = f"{uh:02d}:{um:02d}:{us:02d}" if uh > 0 else f"{um:02d}:{us:02d}"
+        qsize = m.get("queue_size", 0)
+        qmax = m.get("queue_max", 2000)
+        qpct = (qsize / qmax * 100) if qmax > 0 else 0
+        target = m.get("target_bitrate_kbps", 0)
+        pcm = m.get("pcm_feed_kbps", 0)
+        return (
+            f"Conexão: {conn} | Bitrate: {target} kbps\n"
+            f"Feed PCM: {pcm:.0f} kbps | "
+            f"Qualidade: {m.get('quality_score', 1) * 100:.1f}%\n"
+            f"Enviados: {m.get('frames_sent', 0)} | "
+            f"Drops: {m.get('frames_dropped', 0)}\n"
+            f"Queue: {qsize}/{qmax} ({qpct:.0f}%) | "
+            f"Pico: {m.get('queue_peak', 0)}\n"
+            f"Reconexões: {m.get('reconnect_count', 0)} | "
+            f"Uptime: {uptime_str}"
+        )
+
+    def _update_metrics_display(self, rtmp_active, rtmp_m, ice_active, ice_m):
+        self.rtmp_metrics_var.set(self._format_metrics(rtmp_m, rtmp_active))
+        self.ice_metrics_var.set(self._format_metrics(ice_m, ice_active))
+
+        best_quality = 1.0
+        any_stream = False
+        for active, m in ((rtmp_active, rtmp_m), (ice_active, ice_m)):
+            if active and m:
+                any_stream = True
+                q = m.get("quality_score", 1.0)
+                if q < best_quality:
+                    best_quality = q
+
+        if any_stream:
+            bar_width = 198
+            bar_x = max(1, int(best_quality * bar_width))
+            if best_quality >= 0.98:
+                color = "#22CC22"
+            elif best_quality >= 0.95:
+                color = "#CCCC00"
+            else:
+                color = "#FF2222"
+            self._quality_canvas.coords(self._quality_bar, 1, 1, bar_x, 11)
+            self._quality_canvas.itemconfig(self._quality_bar, fill=color)
+            self.quality_label.config(text=f"{best_quality * 100:.1f}%")
+        else:
+            self._quality_canvas.coords(self._quality_bar, 1, 1, 1, 11)
+            self.quality_label.config(text="--")
 
     # ── Recording tab ─────────────────────────────────────────────
 
@@ -708,43 +807,81 @@ class CensuraDigitalInterface:
 
     # ── Streaming controls ────────────────────────────────────────
 
+    def _is_recording_active(self):
+        if USE_WORKER_RECORDING and self._worker_proc is not None:
+            return True
+        return self.censura is not None and self.censura.is_recording
+
     def start_rtmp(self):
-        if not self.censura.is_recording:
+        if not self._is_recording_active():
             messagebox.showwarning("Gravação Inativa", "Inicie a gravação antes de iniciar o streaming RTMP.")
             return
         self._stream_error = False
         url = self.rtmp_url_var.get().strip()
         bitrate = self.rtmp_bitrate_var.get()
-        if self.stream_manager.start_rtmp(url=url, bitrate=bitrate):
+        if USE_WORKER_RECORDING and self._worker_proc is not None:
+            try:
+                with open(WORKER_RTMP_CMD_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"action": "start", "url": url, "bitrate": bitrate}, f)
+                self.rtmp_start_btn.config(state="disabled")
+                self.rtmp_stop_btn.config(state="normal")
+            except Exception as e:
+                messagebox.showerror("Erro", str(e))
+        elif self.stream_manager.start_rtmp(url=url, bitrate=bitrate):
             self.rtmp_start_btn.config(state="disabled")
             self.rtmp_stop_btn.config(state="normal")
 
     def stop_rtmp(self):
-        self.stream_manager.stop_rtmp()
-        self.rtmp_start_btn.config(state="normal")
-        self.rtmp_stop_btn.config(state="disabled")
-        self.rtmp_status_var.set("Inativo")
+        if USE_WORKER_RECORDING and self._worker_proc is not None:
+            try:
+                with open(WORKER_RTMP_CMD_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"action": "stop"}, f)
+                self.rtmp_start_btn.config(state="normal")
+                self.rtmp_stop_btn.config(state="disabled")
+            except Exception:
+                pass
+        else:
+            self.stream_manager.stop_rtmp()
+            self.rtmp_start_btn.config(state="normal")
+            self.rtmp_stop_btn.config(state="disabled")
+            self.rtmp_status_var.set("Inativo")
 
     def start_icecast(self):
-        if not self.censura.is_recording:
+        if not self._is_recording_active():
             messagebox.showwarning("Gravação Inativa", "Inicie a gravação antes de iniciar o streaming Icecast.")
             return
         self._stream_error = False
-        if self.stream_manager.start_icecast(
-            host=self.ice_host_var.get().strip(),
-            port=self.ice_port_var.get(),
-            mount=self.ice_mount_var.get().strip(),
-            password=self.ice_pass_var.get(),
-            bitrate=self.ice_bitrate_var.get(),
-        ):
+        host = self.ice_host_var.get().strip()
+        port = self.ice_port_var.get()
+        mount = self.ice_mount_var.get().strip()
+        password = self.ice_pass_var.get()
+        bitrate = self.ice_bitrate_var.get()
+        if USE_WORKER_RECORDING and self._worker_proc is not None:
+            try:
+                with open(WORKER_ICECAST_CMD_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"action": "start", "host": host, "port": port, "mount": mount, "password": password, "bitrate": bitrate}, f)
+                self.ice_start_btn.config(state="disabled")
+                self.ice_stop_btn.config(state="normal")
+            except Exception as e:
+                messagebox.showerror("Erro", str(e))
+        elif self.stream_manager.start_icecast(host=host, port=port, mount=mount, password=password, bitrate=bitrate):
             self.ice_start_btn.config(state="disabled")
             self.ice_stop_btn.config(state="normal")
 
     def stop_icecast(self):
-        self.stream_manager.stop_icecast()
-        self.ice_start_btn.config(state="normal")
-        self.ice_stop_btn.config(state="disabled")
-        self.ice_status_var.set("Inativo")
+        if USE_WORKER_RECORDING and self._worker_proc is not None:
+            try:
+                with open(WORKER_ICECAST_CMD_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"action": "stop"}, f)
+                self.ice_start_btn.config(state="normal")
+                self.ice_stop_btn.config(state="disabled")
+            except Exception:
+                pass
+        else:
+            self.stream_manager.stop_icecast()
+            self.ice_start_btn.config(state="normal")
+            self.ice_stop_btn.config(state="disabled")
+            self.ice_status_var.set("Inativo")
 
     def save_streaming_config(self):
         if "streaming" not in self.censura.config:
@@ -784,8 +921,9 @@ class CensuraDigitalInterface:
         self.health_var.set("Falha ao iniciar gravação")
         for child in self.root.winfo_children():
             if isinstance(child, ttk.Notebook):
-                config_tab_id = child.tabs()[3]
-                child.tab(config_tab_id, state="normal")
+                tabs = child.tabs()
+                if len(tabs) > 3:
+                    child.tab(tabs[3], state="normal")
         messagebox.showerror("Erro de Gravação", message)
 
     def _show_alert(self, message):
@@ -850,25 +988,45 @@ class CensuraDigitalInterface:
     # ── Device / config ───────────────────────────────────────────
 
     def refresh_devices_list(self):
-        self.audio_devices = [dev for dev in self.censura.get_audio_devices() if dev["maxInputChannels"] > 0]
-        self.device_combo["values"] = [f"{dev['index']}: {dev['name']}" for dev in self.audio_devices]
-        current_idx = self.censura.config["audio"]["device_index"]
+        input_devices = [dev for dev in self.censura.get_audio_devices() if dev["maxInputChannels"] > 0]
+        default_entry = {
+            "index": None,
+            "name": "Padrão (recomendado se a gravação travar)",
+            "maxInputChannels": 1,
+            "maxOutputChannels": 0,
+            "defaultSampleRate": 44100,
+        }
+        self.audio_devices = [default_entry] + input_devices
+        self.device_combo["values"] = [
+            dev["name"] if dev["index"] is None else f"{dev['index']}: {dev['name']}"
+            for dev in self.audio_devices
+        ]
+        current_idx = self.censura.config["audio"].get("device_index")
         for i, dev in enumerate(self.audio_devices):
             if dev["index"] == current_idx:
                 self.device_combo.current(i)
                 self.on_device_select(None)
                 break
+        else:
+            if not self.audio_devices:
+                self.device_details_var.set("Nenhum dispositivo de entrada encontrado.")
+            elif current_idx is not None:
+                self.device_combo.current(0)
+                self.on_device_select(None)
 
     def on_device_select(self, event):
         selected_idx = self.device_combo.current()
         if selected_idx < 0:
             return
         device = self.audio_devices[selected_idx]
-        details = (
-            f"Canais de Entrada: {device['maxInputChannels']} | "
-            f"Canais de Saída: {device['maxOutputChannels']} | "
-            f"Taxa Padrão: {int(device['defaultSampleRate'])} Hz"
-        )
+        if device.get("index") is None:
+            details = "Usa o dispositivo de entrada padrão do Windows. Use esta opção se a gravação travar ou fechar o programa."
+        else:
+            details = (
+                f"Canais de Entrada: {device['maxInputChannels']} | "
+                f"Canais de Saída: {device['maxOutputChannels']} | "
+                f"Taxa Padrão: {int(device['defaultSampleRate'])} Hz"
+            )
         self.device_details_var.set(details)
 
     def browse_directory(self):
@@ -883,7 +1041,7 @@ class CensuraDigitalInterface:
             return
         device = self.audio_devices[selected_idx]
         self.censura.config["audio"]["device_index"] = device["index"]
-        self.censura.config["audio"]["channels"] = device["maxInputChannels"]
+        self.censura.config["audio"]["channels"] = device.get("maxInputChannels") or 1
         self.censura.config["recording"]["output_directory"] = self.output_dir_var.get()
         try:
             self.censura.save_config()
@@ -898,15 +1056,124 @@ class CensuraDigitalInterface:
         self.root.after(0, self._do_start_recording)
 
     def _do_start_recording(self):
+        try:
+            if USE_WORKER_RECORDING:
+                self._do_start_recording_worker()
+            else:
+                self._do_start_recording_inprocess()
+        except Exception as e:
+            self.start_btn.config(state="normal")
+            self.stop_btn.config(state="disabled")
+            messagebox.showerror("Erro ao iniciar gravação", str(e))
+
+    def _do_start_recording_worker(self):
+        if self._worker_proc is not None:
+            return
+        for f in (WORKER_STOP_FILE, WORKER_RTMP_CMD_FILE, WORKER_ICECAST_CMD_FILE):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        worker_path = os.path.join(os.getcwd(), WORKER_SCRIPT)
+        if not os.path.isfile(worker_path):
+            messagebox.showerror("Erro", f"Arquivo {WORKER_SCRIPT} não encontrado.")
+            return
+        cmd = [sys.executable, WORKER_SCRIPT, "--config", self.censura.config_file]
+        if self.monitor_var.get():
+            cmd.append("--monitor")
+        try:
+            worker_log = os.path.join(os.getcwd(), "worker_stderr.log")
+            self._worker_stderr_file = open(worker_log, "w", encoding="utf-8")
+            self._worker_proc = subprocess.Popen(
+                cmd, cwd=os.getcwd(), stdout=subprocess.DEVNULL, stderr=self._worker_stderr_file,
+            )
+        except Exception as e:
+            messagebox.showerror("Erro ao iniciar gravador", str(e))
+            return
+        self.start_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self.health_var.set("Gravação em andamento")
+        for child in self.root.winfo_children():
+            if isinstance(child, ttk.Notebook):
+                tabs = child.tabs()
+                if len(tabs) > 3:
+                    child.tab(tabs[3], state="disabled")
+        self._worker_status_poller()
+
+    def _worker_status_poller(self):
+        if self._worker_proc is None:
+            return
+        ret = self._worker_proc.poll()
+        if ret is not None:
+            self._worker_proc = None
+            self._close_worker_stderr()
+            self.start_btn.config(state="normal")
+            self.stop_btn.config(state="disabled")
+            self.health_var.set("Gravação parada")
+            self.rtmp_start_btn.config(state="normal")
+            self.rtmp_stop_btn.config(state="disabled")
+            self.rtmp_status_var.set("Inativo")
+            self.ice_start_btn.config(state="normal")
+            self.ice_stop_btn.config(state="disabled")
+            for child in self.root.winfo_children():
+                if isinstance(child, ttk.Notebook):
+                    tabs = child.tabs()
+                    if len(tabs) > 3:
+                        child.tab(tabs[3], state="normal")
+            if ret != 0:
+                stderr_hint = ""
+                try:
+                    log_path = os.path.join(os.getcwd(), "worker_stderr.log")
+                    if os.path.isfile(log_path):
+                        with open(log_path, "r", encoding="utf-8") as f:
+                            stderr_hint = f.read().strip()[:500]
+                except Exception:
+                    pass
+                msg = (
+                    f"O gravador encerrou com código {ret}.\n"
+                    "A janela continua aberta.\n\n"
+                    "Tente:\n"
+                    "1) Selecionar 'Padrão' em Configurações → Dispositivo\n"
+                    "2) Fechar outros programas de áudio\n"
+                    "3) Atualizar driver do microfone"
+                )
+                if stderr_hint:
+                    msg += f"\n\nDetalhe do worker:\n{stderr_hint}"
+                messagebox.showerror("Gravação encerrada", msg)
+            return
+        try:
+            if os.path.isfile(WORKER_STATUS_FILE):
+                with open(WORKER_STATUS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("is_recording") and data.get("current_chunk_start"):
+                    start_time = datetime.fromisoformat(data["current_chunk_start"])
+                    elapsed = datetime.now() - start_time
+                    m, s = divmod(elapsed.total_seconds(), 60)
+                    self.status_var.set(f"Gravando chunk #{data.get('chunk_counter', 0)}...\nTempo: {int(m):02d}:{int(s):02d}")
+                self.rtmp_status_var.set(data.get("rtmp_status", "Inativo"))
+                self.ice_status_var.set(data.get("icecast_status", "Inativo"))
+                rtmp_active = data.get("rtmp_active", False)
+                icecast_active = data.get("icecast_active", False)
+                self.rtmp_start_btn.config(state="disabled" if rtmp_active else "normal")
+                self.rtmp_stop_btn.config(state="normal" if rtmp_active else "disabled")
+                self.ice_start_btn.config(state="disabled" if icecast_active else "normal")
+                self.ice_stop_btn.config(state="normal" if icecast_active else "disabled")
+        except Exception:
+            pass
+        if self._worker_proc is not None:
+            self.status_poller = self.root.after(1000, self._worker_status_poller)
+
+    def _do_start_recording_inprocess(self):
         if self.censura.start_recording(enable_monitoring=self.monitor_var.get()):
             self.start_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
             self.health_var.set("Gravação em andamento")
-            # Disable config tab (now index 3)
             for child in self.root.winfo_children():
                 if isinstance(child, ttk.Notebook):
-                    config_tab_id = child.tabs()[3]
-                    child.tab(config_tab_id, state="disabled")
+                    tabs = child.tabs()
+                    if len(tabs) > 3:
+                        child.tab(tabs[3], state="disabled")
             self.update_status()
         else:
             messagebox.showerror(
@@ -924,41 +1191,97 @@ class CensuraDigitalInterface:
         self.ice_stop_btn.config(state="disabled")
         self.ice_status_var.set("Inativo")
 
+        if USE_WORKER_RECORDING and self._worker_proc is not None:
+            self.stop_btn.config(state="disabled")
+            self.health_var.set("Parando gravação...")
+            try:
+                open(WORKER_STOP_FILE, "w").close()
+            except Exception:
+                pass
+
+            def _wait_worker():
+                proc = self._worker_proc
+                if proc is None:
+                    return
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                self.root.after(0, self._on_worker_stopped)
+
+            threading.Thread(target=_wait_worker, daemon=True).start()
+            return
+
         if self.censura.stop_recording():
             self.start_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
             self.health_var.set("Gravação parada")
             for child in self.root.winfo_children():
                 if isinstance(child, ttk.Notebook):
-                    config_tab_id = child.tabs()[3]
-                    child.tab(config_tab_id, state="normal")
+                    tabs = child.tabs()
+                    if len(tabs) > 3:
+                        child.tab(tabs[3], state="normal")
             if self.status_poller:
                 self.root.after_cancel(self.status_poller)
         else:
             messagebox.showwarning("Aviso", "A gravação já estava parada.")
 
+    def _on_worker_stopped(self):
+        """Callback na main thread após o worker parar."""
+        self._worker_proc = None
+        self._close_worker_stderr()
+        if self.status_poller:
+            self.root.after_cancel(self.status_poller)
+            self.status_poller = None
+        try:
+            if os.path.exists(WORKER_STOP_FILE):
+                os.remove(WORKER_STOP_FILE)
+        except Exception:
+            pass
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.health_var.set("Gravação parada")
+        for child in self.root.winfo_children():
+            if isinstance(child, ttk.Notebook):
+                tabs = child.tabs()
+                if len(tabs) > 3:
+                    child.tab(tabs[3], state="normal")
+
+    def _close_worker_stderr(self):
+        f = getattr(self, "_worker_stderr_file", None)
+        if f:
+            try:
+                f.close()
+            except Exception:
+                pass
+            self._worker_stderr_file = None
+
     def update_status(self):
-        if not self.censura.is_recording:
-            return
-        status = self.censura.get_status()
-        if status.get("current_chunk_start"):
-            start_time = datetime.fromisoformat(status["current_chunk_start"])
-            elapsed = datetime.now() - start_time
-            minutes, seconds = divmod(elapsed.total_seconds(), 60)
-            msg = f"Gravando chunk #{status['chunk_counter']}...\nTempo no chunk: {int(minutes):02d}:{int(seconds):02d}"
-            stalls = status.get("stall_count", 0)
-            if stalls > 0:
-                msg += f"  |  Stalls: {stalls}"
-            stream_st = self.stream_manager.get_status()
-            parts = []
-            if stream_st.get("rtmp_active"):
-                parts.append("RTMP")
-            if stream_st.get("icecast_active"):
-                parts.append("Icecast")
-            if parts:
-                msg += f"\nStreaming: {', '.join(parts)}"
-            self.status_var.set(msg)
-        self.status_poller = self.root.after(1000, self.update_status)
+        try:
+            if not self.censura.is_recording:
+                return
+            status = self.censura.get_status()
+            if status.get("current_chunk_start"):
+                start_time = datetime.fromisoformat(status["current_chunk_start"])
+                elapsed = datetime.now() - start_time
+                minutes, seconds = divmod(elapsed.total_seconds(), 60)
+                msg = f"Gravando chunk #{status['chunk_counter']}...\nTempo no chunk: {int(minutes):02d}:{int(seconds):02d}"
+                stalls = status.get("stall_count", 0)
+                if stalls > 0:
+                    msg += f"  |  Stalls: {stalls}"
+                stream_st = self.stream_manager.get_status()
+                parts = []
+                if stream_st.get("rtmp_active"):
+                    parts.append("RTMP")
+                if stream_st.get("icecast_active"):
+                    parts.append("Icecast")
+                if parts:
+                    msg += f"\nStreaming: {', '.join(parts)}"
+                self.status_var.set(msg)
+        except Exception:
+            pass
+        if self.censura.is_recording:
+            self.status_poller = self.root.after(1000, self.update_status)
 
     def toggle_monitoring(self):
         self.volume_slider.config(state="normal" if self.monitor_var.get() else "disabled")
@@ -970,21 +1293,52 @@ class CensuraDigitalInterface:
     def on_closing(self):
         if self._monitor_poller:
             self.root.after_cancel(self._monitor_poller)
-        if self.censura.is_recording:
+        recording_active = (USE_WORKER_RECORDING and self._worker_proc is not None) or (self.censura and self.censura.is_recording)
+        if recording_active:
             answer = messagebox.askyesnocancel(
                 "Sair",
                 "A gravação está em andamento.\nDeseja parar e sair?\nSim: parar e sair\nNão: manter gravando em segundo plano",
             )
             if answer is True:
                 self.stream_manager.stop_all()
-                self.censura.stop_recording()
+                if USE_WORKER_RECORDING and self._worker_proc is not None:
+                    try:
+                        open(WORKER_STOP_FILE, "w").close()
+                    except Exception:
+                        pass
+                    proc = self._worker_proc
+                    self._worker_proc = None
+                    self._close_worker_stderr()
+
+                    def _kill_and_destroy():
+                        if proc:
+                            try:
+                                proc.wait(timeout=5)
+                            except Exception:
+                                try:
+                                    proc.kill()
+                                except Exception:
+                                    pass
+                        try:
+                            if os.path.exists(WORKER_STOP_FILE):
+                                os.remove(WORKER_STOP_FILE)
+                        except Exception:
+                            pass
+                        self.root.after(0, self.root.destroy)
+
+                    threading.Thread(target=_kill_and_destroy, daemon=True).start()
+                    return
+                elif self.censura:
+                    self.censura.stop_recording()
                 self.root.destroy()
             elif answer is False:
+                self._close_worker_stderr()
                 self.root.destroy()
             else:
                 return
         else:
             self.stream_manager.stop_all()
+            self._close_worker_stderr()
             self.root.destroy()
 
 
