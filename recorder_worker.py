@@ -54,6 +54,25 @@ def main():
         _write_status({"is_recording": False, "error": "Falha ao iniciar gravação"})
         sys.exit(4)
 
+    streaming_cfg = censura.config.get("streaming", {})
+    rtmp_cfg = streaming_cfg.get("rtmp", {})
+    if rtmp_cfg.get("enabled"):
+        logger.info("Auto-iniciando RTMP...")
+        stream_manager.start_rtmp(
+            url=rtmp_cfg.get("url", ""),
+            bitrate=int(rtmp_cfg.get("audio_bitrate_kbps", 128)),
+        )
+    ice_cfg = streaming_cfg.get("icecast", {})
+    if ice_cfg.get("enabled"):
+        logger.info("Auto-iniciando Icecast...")
+        stream_manager.start_icecast(
+            host=ice_cfg.get("host", "localhost"),
+            port=int(ice_cfg.get("port", 8000)),
+            mount=ice_cfg.get("mount", "/live"),
+            password=ice_cfg.get("source_password", ""),
+            bitrate=int(ice_cfg.get("audio_bitrate_kbps", 128)),
+        )
+
     try:
         while True:
             _process_stream_commands(stream_manager)
@@ -82,7 +101,7 @@ def main():
 
             if os.path.exists(STOP_FILE):
                 break
-            time.sleep(1.0)
+            time.sleep(0.15)
     finally:
         stream_manager.stop_all()
         censura.stop_recording()

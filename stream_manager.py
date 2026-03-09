@@ -25,6 +25,7 @@ from typing import Optional, Callable, Dict, Any
 FEED_QUEUE_MAXSIZE = 2000
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_BASE_DELAY = 2.0
+RECONNECT_CYCLE_PAUSE = 300.0  # 5 min entre ciclos de reconexão
 METRICS_LOG_INTERVAL = 30.0
 
 
@@ -41,6 +42,7 @@ class StreamMetrics:
     reconnect_count: int = 0
     last_error: str = ""
     connected: bool = False
+    last_disconnect_ts: float = 0.0
     target_bitrate_kbps: int = 0
     _last_log_bytes: int = field(default=0, repr=False)
     _last_log_ts: float = field(default=0.0, repr=False)
@@ -330,6 +332,8 @@ class StreamManager:
         user_stopped = getattr(self, f"_{protocol}_user_stopped", False)
 
         if still_active and not user_stopped:
+            metrics.connected = False
+            metrics.last_disconnect_ts = time.time()
             msg = f"FFmpeg encerrou inesperadamente (code {proc.returncode})"
             if metrics.last_error:
                 msg += f": {metrics.last_error[:200]}"
@@ -338,11 +342,18 @@ class StreamManager:
             if metrics.reconnect_count < MAX_RECONNECT_ATTEMPTS:
                 self._attempt_reconnect(protocol)
             else:
-                setattr(self, f"_{protocol}_active", False)
+                metrics.reconnect_count = 0
+                pause_min = int(RECONNECT_CYCLE_PAUSE // 60)
                 self._notify(
                     protocol,
-                    f"Máximo de reconexões atingido ({MAX_RECONNECT_ATTEMPTS}). Streaming parado.",
+                    f"Ciclo de {MAX_RECONNECT_ATTEMPTS} tentativas esgotado. "
+                    f"Nova tentativa em {pause_min} min...",
                 )
+                time.sleep(RECONNECT_CYCLE_PAUSE)
+                if not getattr(self, f"_{protocol}_user_stopped", False):
+                    self._attempt_reconnect(protocol)
+                else:
+                    setattr(self, f"_{protocol}_active", False)
 
     def _attempt_reconnect(self, protocol: str):
         """Tenta reiniciar o streaming com backoff exponencial."""
@@ -617,6 +628,7 @@ class StreamManager:
             "reconnect_count": m.reconnect_count,
             "uptime_seconds": round(m.uptime_seconds, 0),
             "last_error": m.last_error,
+            "last_disconnect_ts": m.last_disconnect_ts,
         }
 
     def get_status(self) -> Dict[str, Any]:

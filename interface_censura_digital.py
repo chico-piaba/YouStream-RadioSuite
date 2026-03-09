@@ -86,11 +86,16 @@ class SemaphoreWidget(ttk.Frame):
 
 
 class VUMeterWidget(ttk.Frame):
-    """Barra horizontal de nível de áudio em escala dBFS (-60 a 0 dB)."""
+    """Barra horizontal dBFS com decay balístico, ataque rápido e peak hold."""
 
     DB_FLOOR = -60.0
     DB_YELLOW = -12.0
     DB_RED = -3.0
+
+    ATTACK_COEFF = 0.7
+    RELEASE_COEFF = 0.12
+    PEAK_HOLD_S = 1.5
+    ANIM_MS = 30
 
     def __init__(self, parent, bar_width=350, bar_height=28):
         super().__init__(parent)
@@ -109,18 +114,58 @@ class VUMeterWidget(ttk.Frame):
         self._c.create_rectangle(1, 1, bar_width - 1, bar_height - 1, outline="#444444")
 
         self._bar = self._c.create_rectangle(2, 2, 2, bar_height - 2, outline="", fill="#22CC22")
+        self._peak_line = self._c.create_line(2, 2, 2, bar_height - 2, fill="#FF8800", width=2, state="hidden")
 
         for db_mark in [-48, -36, -24, -18, -12, -6, -3, 0]:
             mx = 2 + int(usable * (db_mark - self.DB_FLOOR) / -self.DB_FLOOR)
             self._c.create_line(mx, 1, mx, 5, fill="#888888")
             self._c.create_line(mx, bar_height - 5, mx, bar_height - 1, fill="#888888")
 
-        self._db = self.DB_FLOOR
+        self._target_db = self.DB_FLOOR
+        self._display_db = self.DB_FLOOR
+        self._peak_db = self.DB_FLOOR
+        self._peak_ts = 0.0
+        self._animating = False
 
     def set_db(self, db: float):
-        """Atualiza a barra com valor em dBFS."""
+        """Define nível alvo — animação interna suaviza a transição."""
         db = max(self.DB_FLOOR, min(0.0, db))
-        self._db = db
+        self._target_db = db
+        if db > self._peak_db:
+            self._peak_db = db
+            self._peak_ts = time.time()
+        if not self._animating:
+            self._animating = True
+            self._animate()
+
+    def _animate(self):
+        if self._target_db > self._display_db:
+            self._display_db += (self._target_db - self._display_db) * self.ATTACK_COEFF
+        else:
+            self._display_db += (self._target_db - self._display_db) * self.RELEASE_COEFF
+
+        if self._display_db < self.DB_FLOOR + 0.3:
+            self._display_db = self.DB_FLOOR
+
+        now = time.time()
+        if now - self._peak_ts > self.PEAK_HOLD_S:
+            self._peak_db += (self.DB_FLOOR - self._peak_db) * 0.08
+            if self._peak_db < self.DB_FLOOR + 0.3:
+                self._peak_db = self.DB_FLOOR
+
+        self._draw()
+
+        still_moving = (
+            abs(self._display_db - self._target_db) > 0.2
+            or self._peak_db > self.DB_FLOOR + 0.3
+        )
+        if still_moving:
+            self.after(self.ANIM_MS, self._animate)
+        else:
+            self._animating = False
+
+    def _draw(self):
+        db = self._display_db
         frac = (db - self.DB_FLOOR) / -self.DB_FLOOR
         bar_x = 2 + int(frac * (self._bw - 4))
 
@@ -133,6 +178,14 @@ class VUMeterWidget(ttk.Frame):
 
         self._c.coords(self._bar, 2, 2, bar_x, self._bh - 2)
         self._c.itemconfig(self._bar, fill=color)
+
+        if self._peak_db > self.DB_FLOOR + 0.3:
+            peak_frac = (self._peak_db - self.DB_FLOOR) / -self.DB_FLOOR
+            peak_x = 2 + int(peak_frac * (self._bw - 4))
+            self._c.coords(self._peak_line, peak_x, 2, peak_x, self._bh - 2)
+            self._c.itemconfig(self._peak_line, state="normal")
+        else:
+            self._c.itemconfig(self._peak_line, state="hidden")
 
 
 # ── Processor window (unchanged) ─────────────────────────────────
@@ -251,6 +304,9 @@ class CensuraDigitalInterface:
         self.status_poller = None
         self._monitor_poller = None
         self._worker_proc = None
+        self._last_worker_rtmp_msg = ""
+        self._last_worker_ice_msg = ""
+        self._cached_worker_data = None
 
         # Carregamento direto no mesmo processo (como no censura-digital funcional)
         load_frame = tk.Frame(self.root, bg="#1a1a2e")
@@ -427,6 +483,12 @@ class CensuraDigitalInterface:
         self.rec_card_status.pack()
         self.rec_card_detail = ttk.Label(rec_card, text="--", anchor="center", font=("Arial", 9))
         self.rec_card_detail.pack(pady=(2, 0))
+        rec_btn_f = ttk.Frame(rec_card)
+        rec_btn_f.pack(pady=(6, 0), fill="x")
+        self.mon_rec_start = ttk.Button(rec_btn_f, text="Iniciar", command=self.start_recording)
+        self.mon_rec_start.pack(side="left", expand=True, fill="x", padx=1)
+        self.mon_rec_stop = ttk.Button(rec_btn_f, text="Parar", command=self.stop_recording, state="disabled")
+        self.mon_rec_stop.pack(side="left", expand=True, fill="x", padx=1)
 
         # Card: RTMP
         rtmp_card = ttk.LabelFrame(cards_frame, text="RTMP", padding="10")
@@ -437,6 +499,12 @@ class CensuraDigitalInterface:
         self.rtmp_card_status.pack()
         self.rtmp_card_detail = ttk.Label(rtmp_card, text="--", anchor="center", font=("Arial", 9))
         self.rtmp_card_detail.pack(pady=(2, 0))
+        rtmp_btn_f = ttk.Frame(rtmp_card)
+        rtmp_btn_f.pack(pady=(6, 0), fill="x")
+        self.mon_rtmp_start = ttk.Button(rtmp_btn_f, text="Iniciar", command=self.start_rtmp)
+        self.mon_rtmp_start.pack(side="left", expand=True, fill="x", padx=1)
+        self.mon_rtmp_stop = ttk.Button(rtmp_btn_f, text="Parar", command=self.stop_rtmp, state="disabled")
+        self.mon_rtmp_stop.pack(side="left", expand=True, fill="x", padx=1)
 
         # Card: Icecast
         ice_card = ttk.LabelFrame(cards_frame, text="Icecast", padding="10")
@@ -447,6 +515,12 @@ class CensuraDigitalInterface:
         self.ice_card_status.pack()
         self.ice_card_detail = ttk.Label(ice_card, text="--", anchor="center", font=("Arial", 9))
         self.ice_card_detail.pack(pady=(2, 0))
+        ice_btn_f = ttk.Frame(ice_card)
+        ice_btn_f.pack(pady=(6, 0), fill="x")
+        self.mon_ice_start = ttk.Button(ice_btn_f, text="Iniciar", command=self.start_icecast)
+        self.mon_ice_start.pack(side="left", expand=True, fill="x", padx=1)
+        self.mon_ice_stop = ttk.Button(ice_btn_f, text="Parar", command=self.stop_icecast, state="disabled")
+        self.mon_ice_stop.pack(side="left", expand=True, fill="x", padx=1)
 
         # Streaming metrics panel
         metrics_frame = ttk.LabelFrame(frame, text="Métricas de Transmissão", padding="8")
@@ -511,31 +585,55 @@ class CensuraDigitalInterface:
     def _start_monitor_loop(self):
         self._update_monitor()
 
+    def _apply_worker_data(self, status, stream_st, wd):
+        """Mescla dados do worker no status/stream_st local."""
+        status = {
+            **status,
+            "is_recording": wd.get("is_recording", False),
+            "chunk_counter": wd.get("chunk_counter", 0),
+            "current_chunk_start": wd.get("current_chunk_start"),
+            "current_level": wd.get("current_level", 0.0),
+            "stall_count": wd.get("stall_count", 0),
+        }
+        stream_st = {
+            **stream_st,
+            "rtmp_active": wd.get("rtmp_active", False),
+            "icecast_active": wd.get("icecast_active", False),
+            "rtmp_status": wd.get("rtmp_status", "Inativo"),
+            "icecast_status": wd.get("icecast_status", "Inativo"),
+            "rtmp_metrics": wd.get("rtmp_metrics", {}),
+            "icecast_metrics": wd.get("icecast_metrics", {}),
+        }
+        return status, stream_st
+
     def _update_monitor(self):
         status = self.censura.get_status()
         stream_st = self.stream_manager.get_status()
-        worker_data = None
-        if USE_WORKER_RECORDING and self._worker_proc is not None and os.path.isfile(WORKER_STATUS_FILE):
-            try:
-                with open(WORKER_STATUS_FILE, "r", encoding="utf-8") as f:
-                    worker_data = json.load(f)
-                status = {
-                    **status,
-                    "is_recording": worker_data.get("is_recording", False),
-                    "chunk_counter": worker_data.get("chunk_counter", 0),
-                    "current_chunk_start": worker_data.get("current_chunk_start"),
-                    "current_level": worker_data.get("current_level", 0.0),
-                    "stall_count": worker_data.get("stall_count", 0),
-                }
-                stream_st = {
-                    **stream_st,
-                    "rtmp_active": worker_data.get("rtmp_active", False),
-                    "icecast_active": worker_data.get("icecast_active", False),
-                    "rtmp_metrics": worker_data.get("rtmp_metrics", {}),
-                    "icecast_metrics": worker_data.get("icecast_metrics", {}),
-                }
-            except Exception:
-                pass
+        if USE_WORKER_RECORDING and self._worker_proc is not None:
+            if os.path.isfile(WORKER_STATUS_FILE):
+                try:
+                    with open(WORKER_STATUS_FILE, "r", encoding="utf-8") as f:
+                        self._cached_worker_data = json.load(f)
+                except Exception:
+                    pass
+            if self._cached_worker_data is not None:
+                status, stream_st = self._apply_worker_data(
+                    status, stream_st, self._cached_worker_data,
+                )
+
+        # Route streaming status changes to alert bar (worker mode)
+        for proto, key, attr in (
+            ("RTMP", "rtmp_status", "_last_worker_rtmp_msg"),
+            ("Icecast", "icecast_status", "_last_worker_ice_msg"),
+        ):
+            msg = stream_st.get(key, "")
+            prev = getattr(self, attr, "")
+            if msg and msg != prev:
+                setattr(self, attr, msg)
+                if msg != "Inativo" and any(kw in msg.lower() for kw in self._ALERT_KEYWORDS):
+                    ts = time.strftime('%H:%M:%S')
+                    self.alert_var.set(f"[{ts}] {proto}: {msg}")
+
         is_rec = status["is_recording"]
         stalls = status.get("stall_count", 0)
 
@@ -628,6 +726,14 @@ class CensuraDigitalInterface:
         # Streaming metrics panel
         self._update_metrics_display(rtmp_active, rtmp_m, ice_active, ice_m)
 
+        # Sync monitor tab buttons
+        self.mon_rec_start.config(state="disabled" if is_rec else "normal")
+        self.mon_rec_stop.config(state="normal" if is_rec else "disabled")
+        self.mon_rtmp_start.config(state="normal" if (is_rec and not rtmp_active) else "disabled")
+        self.mon_rtmp_stop.config(state="normal" if rtmp_active else "disabled")
+        self.mon_ice_start.config(state="normal" if (is_rec and not ice_active) else "disabled")
+        self.mon_ice_stop.config(state="normal" if ice_active else "disabled")
+
         self._monitor_poller = self.root.after(MONITOR_REFRESH_MS, self._update_monitor)
 
     def _format_metrics(self, m: dict, active: bool) -> str:
@@ -643,6 +749,11 @@ class CensuraDigitalInterface:
         qpct = (qsize / qmax * 100) if qmax > 0 else 0
         target = m.get("target_bitrate_kbps", 0)
         pcm = m.get("pcm_feed_kbps", 0)
+        last_disc = m.get("last_disconnect_ts", 0)
+        if last_disc > 0:
+            disc_str = datetime.fromtimestamp(last_disc).strftime("%H:%M:%S")
+        else:
+            disc_str = "—"
         return (
             f"Conexão: {conn} | Bitrate: {target} kbps\n"
             f"Feed PCM: {pcm:.0f} kbps | "
@@ -652,6 +763,7 @@ class CensuraDigitalInterface:
             f"Queue: {qsize}/{qmax} ({qpct:.0f}%) | "
             f"Pico: {m.get('queue_peak', 0)}\n"
             f"Reconexões: {m.get('reconnect_count', 0)} | "
+            f"Último drop: {disc_str}\n"
             f"Uptime: {uptime_str}"
         )
 
@@ -744,6 +856,8 @@ class CensuraDigitalInterface:
         self.rtmp_start_btn.pack(side="left", padx=5, expand=True, fill="x")
         self.rtmp_stop_btn = ttk.Button(btn_rtmp, text="Parar RTMP", command=self.stop_rtmp, state="disabled")
         self.rtmp_stop_btn.pack(side="left", padx=5, expand=True, fill="x")
+        self.rtmp_autostart_var = tk.BooleanVar(value=rtmp_cfg.get("enabled", False))
+        ttk.Checkbutton(rtmp_frame, text="Iniciar automaticamente com a gravação", variable=self.rtmp_autostart_var).grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
         rtmp_frame.columnconfigure(1, weight=1)
 
         # Icecast
@@ -774,6 +888,8 @@ class CensuraDigitalInterface:
         self.ice_start_btn.pack(side="left", padx=5, expand=True, fill="x")
         self.ice_stop_btn = ttk.Button(btn_ice, text="Parar Icecast", command=self.stop_icecast, state="disabled")
         self.ice_stop_btn.pack(side="left", padx=5, expand=True, fill="x")
+        self.ice_autostart_var = tk.BooleanVar(value=ice_cfg.get("enabled", False))
+        ttk.Checkbutton(ice_frame, text="Iniciar automaticamente com a gravação", variable=self.ice_autostart_var).grid(row=5, column=0, columnspan=4, sticky="w", pady=(2, 0))
         ice_frame.columnconfigure(1, weight=1)
         ice_frame.columnconfigure(3, weight=1)
 
@@ -887,12 +1003,12 @@ class CensuraDigitalInterface:
         if "streaming" not in self.censura.config:
             self.censura.config["streaming"] = {}
         self.censura.config["streaming"]["rtmp"] = {
-            "enabled": False,
+            "enabled": self.rtmp_autostart_var.get(),
             "url": self.rtmp_url_var.get().strip(),
             "audio_bitrate_kbps": self.rtmp_bitrate_var.get(),
         }
         self.censura.config["streaming"]["icecast"] = {
-            "enabled": False,
+            "enabled": self.ice_autostart_var.get(),
             "host": self.ice_host_var.get().strip(),
             "port": self.ice_port_var.get(),
             "mount": self.ice_mount_var.get().strip(),
@@ -933,10 +1049,20 @@ class CensuraDigitalInterface:
     def _on_stream_status(self, protocol, message):
         self.root.after(0, self._update_stream_status, protocol, message)
 
+    _ALERT_KEYWORDS = (
+        "erro", "encerrou", "reconexão", "tentativa", "ciclo",
+        "falha", "conexão estabelecida", "conectando",
+    )
+
     def _update_stream_status(self, protocol, message):
         is_error = "erro" in message.lower() or "encerrou" in message.lower() or "não encontrado" in message.lower()
         if is_error:
             self._stream_error = True
+
+        lower = message.lower()
+        if any(kw in lower for kw in self._ALERT_KEYWORDS):
+            ts = time.strftime('%H:%M:%S')
+            self.alert_var.set(f"[{ts}] {protocol.upper()}: {message}")
 
         if protocol == "rtmp":
             self.rtmp_status_var.set(message)
@@ -1107,6 +1233,7 @@ class CensuraDigitalInterface:
         ret = self._worker_proc.poll()
         if ret is not None:
             self._worker_proc = None
+            self._cached_worker_data = None
             self._close_worker_stderr()
             self.start_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
@@ -1164,6 +1291,18 @@ class CensuraDigitalInterface:
         if self._worker_proc is not None:
             self.status_poller = self.root.after(1000, self._worker_status_poller)
 
+    def _autostart_streams(self):
+        """Auto-inicia RTMP e/ou Icecast se configurado como automático."""
+        if not self._is_recording_active():
+            return
+        streaming_cfg = self.censura.config.get("streaming", {})
+        rtmp_cfg = streaming_cfg.get("rtmp", {})
+        if rtmp_cfg.get("enabled") and not self.stream_manager._rtmp_active:
+            self.start_rtmp()
+        ice_cfg = streaming_cfg.get("icecast", {})
+        if ice_cfg.get("enabled") and not self.stream_manager._icecast_active:
+            self.start_icecast()
+
     def _do_start_recording_inprocess(self):
         if self.censura.start_recording(enable_monitoring=self.monitor_var.get()):
             self.start_btn.config(state="disabled")
@@ -1175,6 +1314,7 @@ class CensuraDigitalInterface:
                     if len(tabs) > 3:
                         child.tab(tabs[3], state="disabled")
             self.update_status()
+            self.root.after(2000, self._autostart_streams)
         else:
             messagebox.showerror(
                 "Erro de Gravação",
@@ -1229,6 +1369,7 @@ class CensuraDigitalInterface:
     def _on_worker_stopped(self):
         """Callback na main thread após o worker parar."""
         self._worker_proc = None
+        self._cached_worker_data = None
         self._close_worker_stderr()
         if self.status_poller:
             self.root.after_cancel(self.status_poller)
